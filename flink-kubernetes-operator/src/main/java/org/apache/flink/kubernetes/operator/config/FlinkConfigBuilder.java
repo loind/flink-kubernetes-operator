@@ -278,6 +278,24 @@ public class FlinkConfigBuilder {
                         StandaloneKubernetesConfigOptionsInternal.KUBERNETES_TASKMANAGER_REPLICAS,
                         spec.getTaskManager().getReplicas());
             }
+
+            // Extract memoryLimitFactor and cpuLimitFactor from taskManager.podTemplate
+            // This allows per-deployment override of resource limits
+            if (spec.getTaskManager().getPodTemplate() != null) {
+                extractMemoryLimitFactorFromPodTemplate(spec.getTaskManager().getPodTemplate())
+                        .ifPresent(
+                                factor ->
+                                        effectiveConfig.set(
+                                                KubernetesConfigOptions
+                                                        .TASK_MANAGER_MEMORY_LIMIT_FACTOR,
+                                                factor));
+                extractCpuLimitFactorFromPodTemplate(spec.getTaskManager().getPodTemplate())
+                        .ifPresent(
+                                factor ->
+                                        effectiveConfig.set(
+                                                KubernetesConfigOptions.TASK_MANAGER_CPU_LIMIT_FACTOR,
+                                                factor));
+            }
         }
 
         if (spec.getJob() != null
@@ -541,6 +559,107 @@ public class FlinkConfigBuilder {
                 .put(CrdConstants.EPHEMERAL_STORAGE, Quantity.parse(ephemeralStorage));
         container.setResources(resourceRequirements);
         return container;
+    }
+
+    /**
+     * Extract memory limit factor from taskManager podTemplate container resources.
+     * memoryLimitFactor = limits.memory / requests.memory
+     *
+     * @param podTemplate the pod template spec
+     * @return Optional containing the calculated factor if valid resources are found
+     */
+    @VisibleForTesting
+    protected Optional<Double> extractMemoryLimitFactorFromPodTemplate(PodTemplateSpec podTemplate) {
+        return extractLimitFactorFromPodTemplate(
+                podTemplate,
+                (resources) -> {
+                    Quantity limitQty = resources.getLimits().get("memory");
+                    Quantity requestQty = resources.getRequests().get("memory");
+                    if (limitQty == null || requestQty == null) {
+                        return null;
+                    }
+                    return limitQty.getAmount().doubleValue() / requestQty.getAmount().doubleValue();
+                });
+    }
+
+    /**
+     * Extract cpu limit factor from taskManager podTemplate container resources.
+     * cpuLimitFactor = limits.cpu / requests.cpu
+     *
+     * @param podTemplate the pod template spec
+     * @return Optional containing the calculated factor if valid resources are found
+     */
+    @VisibleForTesting
+    protected Optional<Double> extractCpuLimitFactorFromPodTemplate(PodTemplateSpec podTemplate) {
+        return extractLimitFactorFromPodTemplate(
+                podTemplate,
+                (resources) -> {
+                    Quantity limitQty = resources.getLimits().get("cpu");
+                    Quantity requestQty = resources.getRequests().get("cpu");
+                    if (limitQty == null || requestQty == null) {
+                        return null;
+                    }
+                    return limitQty.getAmount().doubleValue() / requestQty.getAmount().doubleValue();
+                });
+    }
+
+    /**
+     * Generic method to extract a limit factor from podTemplate container resources.
+     *
+     * @param podTemplate the pod template spec
+     * @param extractor function to extract the factor value from ResourceRequirements
+     * @return Optional containing the calculated factor if valid resources are found
+     */
+    @VisibleForTesting
+    @SuppressWarnings("FunctionalInterfaceClash")
+    protected Optional<Double> extractLimitFactorFromPodTemplate(
+            PodTemplateSpec podTemplate, ContainerFactorExtractor extractor) {
+        if (podTemplate == null || podTemplate.getSpec() == null) {
+            return Optional.empty();
+        }
+
+        List<Container> containers = podTemplate.getSpec().getContainers();
+        if (containers == null || containers.isEmpty()) {
+            return Optional.empty();
+        }
+
+        // Find the main container (flink-main-container) or use the first container
+        Container targetContainer = null;
+        for (Container container : containers) {
+            if (Constants.MAIN_CONTAINER_NAME.equals(container.getName())) {
+                targetContainer = container;
+                break;
+            }
+        }
+
+        // Fall back to first container if main container not found
+        if (targetContainer == null) {
+            targetContainer = containers.get(0);
+        }
+
+        ResourceRequirements resources = targetContainer.getResources();
+        if (resources == null) {
+            return Optional.empty();
+        }
+
+        try {
+            Double factor = extractor.extract(resources);
+            return factor != null && factor > 0 ? Optional.of(factor) : Optional.empty();
+        } catch (Exception e) {
+            LOG.warn(
+                    "Failed to extract limit factor from podTemplate: {}",
+                    e.getMessage());
+            return Optional.empty();
+        }
+    }
+
+    /**
+     * Functional interface for extracting limit factor from container resources.
+     */
+    @VisibleForTesting
+    @SuppressWarnings("FunctionalInterfaceClash")
+    protected interface ContainerFactorExtractor {
+        Double extract(ResourceRequirements resources);
     }
 
     private static String createLogConfigFiles(String log4jConf, String logbackConf)

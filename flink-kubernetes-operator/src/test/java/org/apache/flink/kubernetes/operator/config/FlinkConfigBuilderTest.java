@@ -50,7 +50,10 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.dataformat.yaml.YAMLFactory;
 import io.fabric8.kubernetes.api.model.Container;
 import io.fabric8.kubernetes.api.model.ObjectMeta;
+import io.fabric8.kubernetes.api.model.PodSpec;
 import io.fabric8.kubernetes.api.model.PodTemplateSpec;
+import io.fabric8.kubernetes.api.model.Quantity;
+import io.fabric8.kubernetes.api.model.ResourceRequirements;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -63,6 +66,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 
 import static org.apache.flink.configuration.DeploymentOptions.SHUTDOWN_ON_APPLICATION_FINISH;
 import static org.apache.flink.kubernetes.operator.api.utils.BaseTestUtils.IMAGE;
@@ -932,5 +936,165 @@ public class FlinkConfigBuilderTest {
         var pod =
                 TestUtils.getTestPodTemplate("hostname", List.of(mainContainer, sideCarContainer));
         return pod;
+    }
+
+    @Test
+    public void testExtractMemoryLimitFactorFromPodTemplate() {
+        // Create pod template with main container having resources
+        PodTemplateSpec podTemplate = new PodTemplateSpec();
+        PodSpec podSpec = new PodSpec();
+        Container mainContainer = new Container();
+        mainContainer.setName(Constants.MAIN_CONTAINER_NAME);
+
+        ResourceRequirements resources = new ResourceRequirements();
+        resources.getRequests().put("memory", new Quantity("2000Mi"));
+        resources.getLimits().put("memory", new Quantity("2500Mi"));
+        mainContainer.setResources(resources);
+
+        podSpec.getContainers().add(mainContainer);
+        podTemplate.setSpec(podSpec);
+
+        FlinkConfigBuilder builder =
+                new FlinkConfigBuilder(flinkDeployment, new Configuration());
+        Optional<Double> result = builder.extractMemoryLimitFactorFromPodTemplate(podTemplate);
+
+        Assertions.assertTrue(result.isPresent());
+        // 2500 / 2000 = 1.25
+        assertEquals(1.25, result.get(), 0.001);
+    }
+
+    @Test
+    public void testExtractCpuLimitFactorFromPodTemplate() {
+        // Create pod template with main container having resources
+        PodTemplateSpec podTemplate = new PodTemplateSpec();
+        PodSpec podSpec = new PodSpec();
+        Container mainContainer = new Container();
+        mainContainer.setName(Constants.MAIN_CONTAINER_NAME);
+
+        ResourceRequirements resources = new ResourceRequirements();
+        resources.getRequests().put("cpu", new Quantity("500m"));
+        resources.getLimits().put("cpu", new Quantity("1"));
+        mainContainer.setResources(resources);
+
+        podSpec.getContainers().add(mainContainer);
+        podTemplate.setSpec(podSpec);
+
+        FlinkConfigBuilder builder =
+                new FlinkConfigBuilder(flinkDeployment, new Configuration());
+        Optional<Double> result = builder.extractCpuLimitFactorFromPodTemplate(podTemplate);
+
+        Assertions.assertTrue(result.isPresent());
+        // 1000m / 500m = 2.0
+        assertEquals(2.0, result.get(), 0.001);
+    }
+
+    @Test
+    public void testExtractLimitFactorFromPodTemplate_NoMainContainer() {
+        // Create pod template without main container - should use first container
+        PodTemplateSpec podTemplate = new PodTemplateSpec();
+        PodSpec podSpec = new PodSpec();
+        Container sidecarContainer = new Container();
+        sidecarContainer.setName("sidecar");
+
+        ResourceRequirements resources = new ResourceRequirements();
+        resources.getRequests().put("memory", new Quantity("1000Mi"));
+        resources.getLimits().put("memory", new Quantity("1500Mi"));
+        sidecarContainer.setResources(resources);
+
+        podSpec.getContainers().add(sidecarContainer);
+        podTemplate.setSpec(podSpec);
+
+        FlinkConfigBuilder builder =
+                new FlinkConfigBuilder(flinkDeployment, new Configuration());
+        Optional<Double> result = builder.extractMemoryLimitFactorFromPodTemplate(podTemplate);
+
+        Assertions.assertTrue(result.isPresent());
+        // 1500 / 1000 = 1.5
+        assertEquals(1.5, result.get(), 0.001);
+    }
+
+    @Test
+    public void testExtractLimitFactorFromPodTemplate_NullPodTemplate() {
+        FlinkConfigBuilder builder =
+                new FlinkConfigBuilder(flinkDeployment, new Configuration());
+        Optional<Double> result = builder.extractMemoryLimitFactorFromPodTemplate(null);
+        Assertions.assertFalse(result.isPresent());
+    }
+
+    @Test
+    public void testExtractLimitFactorFromPodTemplate_NullResources() {
+        PodTemplateSpec podTemplate = new PodTemplateSpec();
+        PodSpec podSpec = new PodSpec();
+        Container mainContainer = new Container();
+        mainContainer.setName(Constants.MAIN_CONTAINER_NAME);
+        // No resources set
+        podSpec.getContainers().add(mainContainer);
+        podTemplate.setSpec(podSpec);
+
+        FlinkConfigBuilder builder =
+                new FlinkConfigBuilder(flinkDeployment, new Configuration());
+        Optional<Double> result = builder.extractMemoryLimitFactorFromPodTemplate(podTemplate);
+        Assertions.assertFalse(result.isPresent());
+    }
+
+    @Test
+    public void testExtractLimitFactorFromPodTemplate_MissingLimitOrRequest() {
+        PodTemplateSpec podTemplate = new PodTemplateSpec();
+        PodSpec podSpec = new PodSpec();
+        Container mainContainer = new Container();
+        mainContainer.setName(Constants.MAIN_CONTAINER_NAME);
+
+        ResourceRequirements resources = new ResourceRequirements();
+        // Only requests, no limits
+        resources.getRequests().put("memory", new Quantity("2000Mi"));
+        mainContainer.setResources(resources);
+
+        podSpec.getContainers().add(mainContainer);
+        podTemplate.setSpec(podSpec);
+
+        FlinkConfigBuilder builder =
+                new FlinkConfigBuilder(flinkDeployment, new Configuration());
+        Optional<Double> result = builder.extractMemoryLimitFactorFromPodTemplate(podTemplate);
+        Assertions.assertFalse(result.isPresent());
+    }
+
+    @Test
+    public void testApplyTaskManagerSpecWithPodTemplateLimitFactors() {
+        // Create FlinkDeployment with taskManager podTemplate containing resources
+        FlinkDeployment deployment = TestUtils.buildApplicationCluster();
+        TaskManagerSpec tmSpec = new TaskManagerSpec();
+        tmSpec.setPodTemplate(new PodTemplateSpec());
+
+        PodSpec podSpec = new PodSpec();
+        Container mainContainer = new Container();
+        mainContainer.setName(Constants.MAIN_CONTAINER_NAME);
+
+        ResourceRequirements resources = new ResourceRequirements();
+        resources.getRequests().put("memory", new Quantity("2000Mi"));
+        resources.getLimits().put("memory", new Quantity("2500Mi"));
+        resources.getRequests().put("cpu", new Quantity("500m"));
+        resources.getLimits().put("cpu", new Quantity("1"));
+        mainContainer.setResources(resources);
+
+        podSpec.getContainers().add(mainContainer);
+        tmSpec.getPodTemplate().setSpec(podSpec);
+        deployment.getSpec().setTaskManager(tmSpec);
+
+        Configuration config =
+                new FlinkConfigBuilder(deployment, new Configuration())
+                        .applyTaskManagerSpec()
+                        .build();
+
+        // Verify limit factors are extracted and set
+        Assertions.assertTrue(
+                config.contains(KubernetesConfigOptions.TASK_MANAGER_MEMORY_LIMIT_FACTOR));
+        assertEquals(
+                1.25,
+                config.get(KubernetesConfigOptions.TASK_MANAGER_MEMORY_LIMIT_FACTOR),
+                0.001);
+
+        Assertions.assertTrue(config.contains(KubernetesConfigOptions.TASK_MANAGER_CPU_LIMIT_FACTOR));
+        assertEquals(
+                2.0, config.get(KubernetesConfigOptions.TASK_MANAGER_CPU_LIMIT_FACTOR), 0.001);
     }
 }
