@@ -68,6 +68,7 @@ import java.nio.file.Files;
 import java.time.Duration;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.List;
 import java.util.Optional;
 
 import static org.apache.flink.configuration.DeploymentOptions.SHUTDOWN_ON_APPLICATION_FINISH;
@@ -578,7 +579,8 @@ public class FlinkConfigBuilder {
                     if (limitQty == null || requestQty == null) {
                         return null;
                     }
-                    return limitQty.getAmount().doubleValue() / requestQty.getAmount().doubleValue();
+                    return limitQty.getNumericalAmount().doubleValue()
+                            / requestQty.getNumericalAmount().doubleValue();
                 });
     }
 
@@ -599,7 +601,8 @@ public class FlinkConfigBuilder {
                     if (limitQty == null || requestQty == null) {
                         return null;
                     }
-                    return limitQty.getAmount().doubleValue() / requestQty.getAmount().doubleValue();
+                    return limitQty.getNumericalAmount().doubleValue()
+                            / requestQty.getNumericalAmount().doubleValue();
                 });
     }
 
